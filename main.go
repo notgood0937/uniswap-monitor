@@ -2,6 +2,7 @@ package main
 
 import (
 	"UniswapStalker/erc20"
+	v2 "UniswapStalker/v2"
 	v3 "UniswapStalker/v3"
 	"context"
 	"fmt"
@@ -11,7 +12,9 @@ import (
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"log"
+	"math"
 	"math/big"
+	"strings"
 )
 
 const (
@@ -20,15 +23,18 @@ const (
 	//uniswapv2Factory = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
 	uniswapv3Factory = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 
+	WrapETHAddress = "0xc02aaa39b223fe8d0a0e5c4f27ead9083c756cc2"
+
 	//base
 	//infuraURL        = "wss://base-mainnet.g.alchemy.com/v2/XrljRQCnLOediLbLZ2jdByDj_LMcu73D"
 	//uniswapv2Factory = "0x33128a8fC17869897dcE68Ed026d694621f6FDfD"
 )
 
 type Token struct {
-	Name     string
-	Symbol   string
-	Decimals uint8
+	Name        string
+	Symbol      string
+	Decimals    uint8
+	TotalSupply *big.Int
 }
 
 func getTokenInfo(client *ethclient.Client, token common.Address) *Token {
@@ -55,6 +61,11 @@ func getTokenInfo(client *ethclient.Client, token common.Address) *Token {
 		panic(err)
 	}
 	tokenInfo.Decimals = decimals
+	totalSupply, err := token0.TotalSupply(&bind.CallOpts{})
+	if err != nil {
+		panic(err)
+	}
+	tokenInfo.TotalSupply = totalSupply
 	return tokenInfo
 }
 
@@ -66,6 +77,76 @@ func main() {
 	}
 	defer client.Close()
 
+	//监听uniswap swap事件日志
+	//SwapEventListen(client)
+	//监听uniswap交易对创建事件
+	PairCreatedEventListen(client)
+
+}
+
+func PairCreatedEventListen(client *ethclient.Client) {
+	pairCreatedSigHash := common.HexToHash("0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9")
+	factoryAddress := "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
+	v2FactoryAddress := common.HexToAddress(factoryAddress)
+	v2Factory, err := v2.NewV2Factory(v2FactoryAddress, client)
+	if err != nil {
+		log.Fatalf("Failed to create instance of factory contract: %v", err)
+	}
+	query := ethereum.FilterQuery{
+		Addresses: []common.Address{v2FactoryAddress},
+	}
+
+	// Subscribe to the PairCreated events
+	logs := make(chan types.Log)
+	sub, err := client.SubscribeFilterLogs(context.Background(), query, logs)
+	if err != nil {
+		log.Fatalf("Failed to subscribe to logs: %v", err)
+	}
+	defer sub.Unsubscribe()
+	fmt.Println("Listening for PairCreated events...")
+
+	for {
+		select {
+		case err := <-sub.Err():
+			log.Fatalf("Error while listening for logs: %v", err)
+		case vLog := <-logs:
+			switch vLog.Topics[0].Hex() {
+			case pairCreatedSigHash.Hex():
+				event, err := v2Factory.ParsePairCreated(vLog)
+				if err != nil {
+					log.Fatalf("Failed to parse pair created event: %v", err)
+				}
+				//fmt.Println(event)
+				//只打印weth交易对
+				weth := common.HexToAddress(WrapETHAddress).Hex()
+				if strings.Contains(common.HexToAddress(event.Token0.Hex()).Hex(), weth) || strings.Contains(common.HexToAddress(event.Token1.Hex()).Hex(), weth) {
+					if strings.Contains(common.HexToAddress(event.Token0.Hex()).Hex(), weth) {
+						Token1 := getTokenInfo(client, event.Token1)
+						t1 := new(big.Float)
+						t1.SetString(Token1.TotalSupply.String())
+						ts := new(big.Float).Quo(t1, big.NewFloat(math.Pow10(int(Token1.Decimals))))
+						fmt.Printf("PairCreated event:\n Token: name: %s address: %s totalsuppy:%f  pair: %s\n", Token1.Symbol, event.Token1.Hex(), ts, event.Pair)
+
+					} else {
+						Token0 := getTokenInfo(client, event.Token0)
+						t0 := new(big.Float)
+						t0.SetString(Token0.TotalSupply.String())
+						ts := new(big.Float).Quo(t0, big.NewFloat(math.Pow10(int(Token0.Decimals))))
+						fmt.Printf("PairCreated event:\n Token: name: %s address: %s  totalsuppy:%f  pair: %s\n", Token0.Symbol, event.Token0, ts, event.Pair)
+					}
+				}
+
+				//todo
+				//	若pair address在pool内发生swap事件，则认为该币开盘
+
+			}
+
+		}
+	}
+
+}
+
+func SwapEventListen(client *ethclient.Client) {
 	// Replace with the actual address of the Uniswap V2 factory contract
 	Token0Address := common.HexToAddress("0xEE2a03Aa6Dacf51C18679C516ad5283d8E7C2637")
 	wethAddress := common.HexToAddress("0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2")
@@ -140,17 +221,32 @@ func main() {
 				if err != nil {
 					log.Fatalf("Failed to parse log: %v", err)
 				}
-				if event.Amount1.Cmp(big.NewInt(0)) < 0 {
-					fmt.Println("Swap event:Buy")
-					fmt.Printf("buy %s %s use %s %s\n", event.Amount1, token0Info.Symbol, event.Amount0, token1Info.Symbol)
-				} else {
-					fmt.Println("Swap event:Sell")
-					fmt.Printf("sell %s %s to %s %s\n", event.Amount1, token0Info.Symbol, event.Amount0, token1Info.Symbol)
-				}
+				//判断那个是weth
+
+				//if event.Amount1.Cmp(big.NewInt(0)) < 0 {
+				//	f0balance := new(big.Float)
+				//	f0balance.SetString(event.Amount0.String())
+				//	f1balance := new(big.Float)
+				//	f1balance.SetString(event.Amount1.String())
+				//	token0Value := new(big.Float).Quo(f0balance, big.NewFloat(math.Pow10(int(token1Info.Decimals))))
+				//	token1Value := new(big.Float).Quo(f1balance, big.NewFloat(math.Pow10(int(token0Info.Decimals))))
+				//	fmt.Println("Swap event:Buy")
+				//	fmt.Printf("buy %f %s use %f %s\n", new(big.Float).Abs(token1Value), token0Info.Symbol, new(big.Float).Abs(token0Value), token1Info.Symbol)
+				//	fmt.Println(event.Tick)
+				//} else {
+				//	f0balance := new(big.Float)
+				//	f0balance.SetString(event.Amount0.String())
+				//	f1balance := new(big.Float)
+				//	f1balance.SetString(event.Amount1.String())
+				//	token0Value := new(big.Float).Quo(f0balance, big.NewFloat(math.Pow10(int(token1Info.Decimals))))
+				//	token1Value := new(big.Float).Quo(f1balance, big.NewFloat(math.Pow10(int(token0Info.Decimals))))
+				//	fmt.Println("Swap event:Sell")
+				//	fmt.Printf("sell %f %s to %f %s\n", new(big.Float).Abs(token1Value), token0Info.Symbol, new(big.Float).Abs(token0Value), token1Info.Symbol)
+				//	fmt.Println(event.Tick)
+				//}
 				//todo 计算价格
 				//可以根据 event.SqrtPriceX96
-
-				//fmt.Printf("Recipient: %s\nSender: %s\nAmount0: %s\nAmount1: %s\n", event.Recipient.Hex(), event.Sender.Hex(), event.Amount0, event.Amount1)
+				fmt.Printf("Recipient: %s\nSender: %s\nAmount0: %s\nAmount1: %s\n", event.Recipient.Hex(), event.Sender.Hex(), event.Amount0, event.Amount1)
 			default:
 				fmt.Println("other:")
 				fmt.Println(vLog.Topics[0])
@@ -159,3 +255,17 @@ func main() {
 		}
 	}
 }
+
+//func SqrtPriceX96ToPrice(sqrtPriceX96 *big.Int) float64 {
+//	// 2^96
+//	twoPow96 := big.NewInt(2).Exp(big.NewInt(2), big.NewInt(96), nil)
+//
+//	// 计算 price
+//	price := new(big.Float).Quo(new(big.Float).SetInt(sqrtPriceX96), new(big.Float).SetInt(twoPow96))
+//	price.Sqrt(price)
+//
+//	// 转换为浮点数
+//	priceFloat, _ := price.Float64()
+//
+//	return priceFloat
+//}
