@@ -117,6 +117,22 @@ func PairCreatedEventListen(client *ethclient.Client) {
 					log.Fatalf("Failed to parse pair created event: %v", err)
 				}
 				//fmt.Println(event)
+				block, err := client.BlockByNumber(context.Background(), big.NewInt(int64(vLog.BlockNumber)))
+				if err != nil {
+					log.Fatal(err)
+				}
+				for _, tx := range block.Transactions() {
+					if tx.Hash() == vLog.TxHash {
+						chainID, err := client.NetworkID(context.Background())
+						if err != nil {
+							log.Fatal(err)
+						}
+						if from, err := types.Sender(types.NewLondonSigner(chainID), tx); err == nil {
+							fmt.Println("sender:", from.Hex())
+
+						}
+					}
+				}
 				//只打印weth交易对
 				weth := common.HexToAddress(WrapETHAddress).Hex()
 				if strings.Contains(common.HexToAddress(event.Token0.Hex()).Hex(), weth) || strings.Contains(common.HexToAddress(event.Token1.Hex()).Hex(), weth) {
@@ -127,12 +143,16 @@ func PairCreatedEventListen(client *ethclient.Client) {
 						ts := new(big.Float).Quo(t1, big.NewFloat(math.Pow10(int(Token1.Decimals))))
 						fmt.Printf("PairCreated event:\n Token: name: %s address: %s totalsuppy:%f  pair: %s\n", Token1.Symbol, event.Token1.Hex(), ts, event.Pair)
 
+						go MarketOpenEventListen(client, event.Pair)
+
 					} else {
 						Token0 := getTokenInfo(client, event.Token0)
 						t0 := new(big.Float)
 						t0.SetString(Token0.TotalSupply.String())
 						ts := new(big.Float).Quo(t0, big.NewFloat(math.Pow10(int(Token0.Decimals))))
 						fmt.Printf("PairCreated event:\n Token: name: %s address: %s  totalsuppy:%f  pair: %s\n", Token0.Symbol, event.Token0, ts, event.Pair)
+
+						go MarketOpenEventListen(client, event.Pair)
 					}
 				}
 
@@ -144,6 +164,43 @@ func PairCreatedEventListen(client *ethclient.Client) {
 		}
 	}
 
+}
+
+func MarketOpenEventListen(client *ethclient.Client, pool common.Address) {
+	v2SwapSigHash := common.HexToHash("0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822")
+	v2PairAddress := common.HexToAddress("0xC75650fe4D14017b1e12341A97721D5ec51D5340")
+	v2Pair, err := v2.NewV2Pair(v2PairAddress, client)
+	if err != nil {
+		log.Fatalf("Failed to create instance of factory contract: %v", err)
+	}
+	query := ethereum.FilterQuery{
+		Addresses: []common.Address{pool},
+	}
+
+	logs := make(chan types.Log)
+	sub, err := client.SubscribeFilterLogs(context.Background(), query, logs)
+	if err != nil {
+		log.Fatalf("Failed to subscribe to logs: %v", err)
+	}
+	defer sub.Unsubscribe()
+	for {
+		select {
+		case err := <-sub.Err():
+			log.Fatalf("Error while listening for logs: %v", err)
+		case vLog := <-logs:
+			switch vLog.Topics[0].Hex() {
+			case v2SwapSigHash.Hex():
+				event, err := v2Pair.ParseSwap(vLog)
+				if err != nil {
+					log.Fatalf("Failed to parse log: %v", err)
+				}
+				fmt.Println("market open --------")
+				fmt.Println("pool:", pool.Hex())
+				fmt.Println(event)
+				sub.Unsubscribe()
+			}
+		}
+	}
 }
 
 func SwapEventListen(client *ethclient.Client) {
