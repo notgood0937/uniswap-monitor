@@ -183,8 +183,13 @@ func MarketOpenEventListen(client *ethclient.Client, pool common.Address) {
 		log.Fatalf("Failed to subscribe to logs: %v", err)
 	}
 	defer sub.Unsubscribe()
+	done := make(chan bool)
 	for {
+		fmt.Println(done)
 		select {
+		case <-done:
+			fmt.Println("goroutine exiting")
+			return
 		case err := <-sub.Err():
 			log.Fatalf("Error while listening for logs: %v", err)
 		case vLog := <-logs:
@@ -197,7 +202,8 @@ func MarketOpenEventListen(client *ethclient.Client, pool common.Address) {
 				fmt.Println("market open --------")
 				fmt.Println("pool:", pool.Hex())
 				fmt.Println(event)
-				sub.Unsubscribe()
+				done <- true
+				//sub.Unsubscribe()
 			}
 		}
 	}
