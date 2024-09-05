@@ -11,15 +11,20 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
+	"github.com/joho/godotenv"
+	"github.com/mymmrac/telego"
+	tu "github.com/mymmrac/telego/telegoutil"
 	"log"
 	"math"
 	"math/big"
+	"os"
+	"strconv"
 	"strings"
 )
 
 const (
 	//main
-	infuraURL = "wss://eth-mainnet.g.alchemy.com/v2/XrljRQCnLOediLbLZ2jdByDj_LMcu73D"
+	//infuraURL = "wss://eth-mainnet.g.alchemy.com/v2/XrljRQCnLOediLbLZ2jdByDj_LMcu73D"
 	//uniswapv2Factory = "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
 	uniswapv3Factory = "0x1F98431c8aD98523631AE4a59f267346ea31F984"
 
@@ -70,8 +75,19 @@ func getTokenInfo(client *ethclient.Client, token common.Address) *Token {
 }
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		log.Fatal("Error loading .env file")
+	}
 	// Connect to the Ethereum client
-	client, err := ethclient.Dial(infuraURL)
+	provider := os.Getenv("INFURA_URL")
+	botToken := os.Getenv("BOT_TOKEN")
+	bot, err := telego.NewBot(botToken, telego.WithDefaultDebugLogger())
+	if err != nil {
+		fmt.Println(err)
+		os.Exit(1)
+	}
+	client, err := ethclient.Dial(provider)
 	if err != nil {
 		log.Fatalf("Failed to connect to the Ethereum client: %v", err)
 	}
@@ -80,15 +96,16 @@ func main() {
 	//监听uniswap swap事件日志
 	//SwapEventListen(client)
 	//监听uniswap交易对创建事件
-	PairCreatedEventListen(client)
+	PairCreatedEventListen(client, bot)
 
 }
 
-func PairCreatedEventListen(client *ethclient.Client) {
+func PairCreatedEventListen(client *ethclient.Client, bot *telego.Bot) {
 	pairCreatedSigHash := common.HexToHash("0x0d3648bd0f6ba80134a33ba9275ac585d9d315f0ad8355cddefde31afa28d0e9")
 	factoryAddress := "0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f"
 	v2FactoryAddress := common.HexToAddress(factoryAddress)
 	v2Factory, err := v2.NewV2Factory(v2FactoryAddress, client)
+	senderAddress := ""
 	if err != nil {
 		log.Fatalf("Failed to create instance of factory contract: %v", err)
 	}
@@ -128,21 +145,39 @@ func PairCreatedEventListen(client *ethclient.Client) {
 							log.Fatal(err)
 						}
 						if from, err := types.Sender(types.NewLondonSigner(chainID), tx); err == nil {
-							fmt.Println("sender:", from.Hex())
+							//fmt.Println("sender:", from.Hex())
+							senderAddress = from.Hex()
+							fmt.Println("sender:", senderAddress)
 
 						}
 					}
 				}
 				//只打印weth交易对
 				weth := common.HexToAddress(WrapETHAddress).Hex()
+				linkPreviewOptions := &telego.LinkPreviewOptions{IsDisabled: true, PreferSmallMedia: true}
 				if strings.Contains(common.HexToAddress(event.Token0.Hex()).Hex(), weth) || strings.Contains(common.HexToAddress(event.Token1.Hex()).Hex(), weth) {
 					if strings.Contains(common.HexToAddress(event.Token0.Hex()).Hex(), weth) {
 						Token1 := getTokenInfo(client, event.Token1)
 						t1 := new(big.Float)
 						t1.SetString(Token1.TotalSupply.String())
 						ts := new(big.Float).Quo(t1, big.NewFloat(math.Pow10(int(Token1.Decimals))))
-						fmt.Printf("PairCreated event:\n Token: name: %s address: %s totalsuppy:%f  pair: %s\n", Token1.Symbol, event.Token1.Hex(), ts, event.Pair)
+						//message :=fmt.Printf("PairCreated event:\n Token: name: %s address: %s totalsuppy:%f  pair: %s\n", Token1.Symbol, event.Token1.Hex(), ts, event.Pair)
 
+						message := fmt.Sprintf("*新币部署*\n\n代币:%s\\(%s\\)\n合约:%s总量:%d\\(精度%d\\)\n创建人地址:%s\n", Token1.Symbol, Token1.Name, event.Token1.Hex(), ts, Token1.Decimals, senderAddress)
+						fmt.Println(message)
+						_, err2 := bot.SendMessage(
+							tu.Message(
+								tu.ID(-1002228256981),
+								"<b>新币部署\n"+"\n"+
+									"代币:"+fmt.Sprintf("<a href='https://etherscan.io/token/%s'>%s(%s)</a>", event.Token1.Hex(), Token1.Symbol, Token1.Name)+"\n"+
+									"合约:<code>"+event.Token1.Hex()+"</code>\n"+
+									"总量:"+ts.String()+" 精度"+strconv.Itoa(int(Token1.Decimals))+"\n"+
+									"创建人地址:<code>"+senderAddress+"</code></b>",
+							).WithParseMode(telego.ModeHTML).WithLinkPreviewOptions(linkPreviewOptions),
+						)
+						if err2 != nil {
+							log.Fatalf("send message err")
+						}
 						go MarketOpenEventListen(client, event.Pair)
 
 					} else {
@@ -150,8 +185,23 @@ func PairCreatedEventListen(client *ethclient.Client) {
 						t0 := new(big.Float)
 						t0.SetString(Token0.TotalSupply.String())
 						ts := new(big.Float).Quo(t0, big.NewFloat(math.Pow10(int(Token0.Decimals))))
-						fmt.Printf("PairCreated event:\n Token: name: %s address: %s  totalsuppy:%f  pair: %s\n", Token0.Symbol, event.Token0, ts, event.Pair)
+						//fmt.Printf("PairCreated event:\n Token: name: %s address: %s  totalsuppy:%f  pair: %s\n", Token0.Symbol, event.Token0, ts, event.Pair)
 
+						message := fmt.Sprintf("*新币部署*\n\n代币:%s\\(%s\\)\n合约:%s\n总量:%d\\(精度%d\\)\n创建人地址:%s\n", Token0.Symbol, Token0.Name, event.Token0.Hex(), ts, Token0.Decimals, senderAddress)
+						fmt.Println(message)
+						_, err2 := bot.SendMessage(
+							tu.Message(
+								tu.ID(-1002228256981),
+								"<b>新币部署\n"+"\n"+
+									"代币:"+fmt.Sprintf("<a href='https://etherscan.io/token/%s'>%s(%s)</a>", event.Token0.Hex(), Token0.Symbol, Token0.Name)+"\n"+
+									"合约:<code>"+event.Token1.Hex()+"</code>\n"+
+									"总量:"+ts.String()+" 精度"+strconv.Itoa(int(Token0.Decimals))+"\n"+
+									"创建人地址:<code>"+senderAddress+"</code></b>",
+							).WithParseMode(telego.ModeHTML).WithLinkPreviewOptions(linkPreviewOptions),
+						)
+						if err2 != nil {
+							log.Fatalf("send message err")
+						}
 						go MarketOpenEventListen(client, event.Pair)
 					}
 				}
@@ -176,7 +226,6 @@ func MarketOpenEventListen(client *ethclient.Client, pool common.Address) {
 	query := ethereum.FilterQuery{
 		Addresses: []common.Address{pool},
 	}
-
 	logs := make(chan types.Log)
 	sub, err := client.SubscribeFilterLogs(context.Background(), query, logs)
 	if err != nil {
@@ -188,8 +237,9 @@ func MarketOpenEventListen(client *ethclient.Client, pool common.Address) {
 		fmt.Println(done)
 		select {
 		case <-done:
+			log.Println("goroutine exiting")
 			fmt.Println("goroutine exiting")
-			return
+			break
 		case err := <-sub.Err():
 			log.Fatalf("Error while listening for logs: %v", err)
 		case vLog := <-logs:
@@ -207,6 +257,7 @@ func MarketOpenEventListen(client *ethclient.Client, pool common.Address) {
 			}
 		}
 	}
+	return
 }
 
 func SwapEventListen(client *ethclient.Client) {
