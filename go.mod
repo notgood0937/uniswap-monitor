@@ -4,6 +4,7 @@ go 1.22.5
 
 require (
 	github.com/ethereum/go-ethereum v1.14.8
+	github.com/joho/godotenv v1.5.1
 	github.com/mymmrac/telego v0.31.2
 )
 
@@ -30,7 +31,6 @@ require (
 	github.com/gorilla/websocket v1.4.2 // indirect
 	github.com/grbit/go-json v0.11.0 // indirect
 	github.com/holiman/uint256 v1.3.1 // indirect
-	github.com/joho/godotenv v1.5.1 // indirect
 	github.com/klauspost/compress v1.17.9 // indirect
 	github.com/klauspost/cpuid/v2 v2.2.6 // indirect
 	github.com/mmcloughlin/addchain v0.4.0 // indirect
