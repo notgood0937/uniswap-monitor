@@ -36,6 +36,7 @@ const (
 )
 
 type Token struct {
+	Address     common.Address
 	Name        string
 	Symbol      string
 	Decimals    uint8
@@ -71,6 +72,8 @@ func getTokenInfo(client *ethclient.Client, token common.Address) *Token {
 		panic(err)
 	}
 	tokenInfo.TotalSupply = totalSupply
+
+	tokenInfo.Address = token
 	return tokenInfo
 }
 
@@ -106,6 +109,7 @@ func PairCreatedEventListen(client *ethclient.Client, bot *telego.Bot) {
 	v2FactoryAddress := common.HexToAddress(factoryAddress)
 	v2Factory, err := v2.NewV2Factory(v2FactoryAddress, client)
 	senderAddress := ""
+	senderBalance := new(big.Float)
 	if err != nil {
 		log.Fatalf("Failed to create instance of factory contract: %v", err)
 	}
@@ -148,13 +152,20 @@ func PairCreatedEventListen(client *ethclient.Client, bot *telego.Bot) {
 							//fmt.Println("sender:", from.Hex())
 							senderAddress = from.Hex()
 							fmt.Println("sender:", senderAddress)
+							balance, err := client.BalanceAt(context.Background(), from, nil)
+							if err != nil {
+								log.Fatal(err)
+							}
+							b1 := new(big.Float)
+							b1.SetString(balance.String())
+							senderBalance = new(big.Float).Quo(b1, big.NewFloat(math.Pow10(18)))
 
 						}
 					}
 				}
 				//只打印weth交易对
 				weth := common.HexToAddress(WrapETHAddress).Hex()
-				linkPreviewOptions := &telego.LinkPreviewOptions{IsDisabled: true, PreferSmallMedia: true}
+				linkPreviewOptions := &telego.LinkPreviewOptions{IsDisabled: true}
 				if strings.Contains(common.HexToAddress(event.Token0.Hex()).Hex(), weth) || strings.Contains(common.HexToAddress(event.Token1.Hex()).Hex(), weth) {
 					if strings.Contains(common.HexToAddress(event.Token0.Hex()).Hex(), weth) {
 						Token1 := getTokenInfo(client, event.Token1)
@@ -168,17 +179,19 @@ func PairCreatedEventListen(client *ethclient.Client, bot *telego.Bot) {
 						_, err2 := bot.SendMessage(
 							tu.Message(
 								tu.ID(-1002228256981),
-								"<b>新币部署\n"+"\n"+
+								"<b>✨ 新币部署 ✨\n"+"\n"+
 									"代币:"+fmt.Sprintf("<a href='https://etherscan.io/token/%s'>%s(%s)</a>", event.Token1.Hex(), Token1.Symbol, Token1.Name)+"\n"+
 									"合约:<code>"+event.Token1.Hex()+"</code>\n"+
 									"总量:"+ts.String()+" 精度"+strconv.Itoa(int(Token1.Decimals))+"\n"+
-									"创建人地址:<code>"+senderAddress+"</code></b>",
+									"创建人:\n\t-地址:<code>"+senderAddress+"</code>\n"+
+									"\t-余额🚰:"+senderBalance.String()+" ETH"+
+									"</b>",
 							).WithParseMode(telego.ModeHTML).WithLinkPreviewOptions(linkPreviewOptions),
 						)
 						if err2 != nil {
 							log.Fatalf("send message err")
 						}
-						go MarketOpenEventListen(client, event.Pair)
+						go MarketOpenEventListen(client, event.Pair, bot, Token1)
 
 					} else {
 						Token0 := getTokenInfo(client, event.Token0)
@@ -192,17 +205,19 @@ func PairCreatedEventListen(client *ethclient.Client, bot *telego.Bot) {
 						_, err2 := bot.SendMessage(
 							tu.Message(
 								tu.ID(-1002228256981),
-								"<b>新币部署\n"+"\n"+
+								"<b>✨ 新币部署 ✨\n"+"\n"+
 									"代币:"+fmt.Sprintf("<a href='https://etherscan.io/token/%s'>%s(%s)</a>", event.Token0.Hex(), Token0.Symbol, Token0.Name)+"\n"+
-									"合约:<code>"+event.Token1.Hex()+"</code>\n"+
+									"合约:<code>"+event.Token0.Hex()+"</code>\n"+
 									"总量:"+ts.String()+" 精度"+strconv.Itoa(int(Token0.Decimals))+"\n"+
-									"创建人地址:<code>"+senderAddress+"</code></b>",
+									"创建人:\n\t-地址:<code>"+senderAddress+"</code>\n"+
+									"\t-余额🚰:"+senderBalance.String()+" ETH"+
+									"</b>",
 							).WithParseMode(telego.ModeHTML).WithLinkPreviewOptions(linkPreviewOptions),
 						)
 						if err2 != nil {
 							log.Fatalf("send message err")
 						}
-						go MarketOpenEventListen(client, event.Pair)
+						go MarketOpenEventListen(client, event.Pair, bot, Token0)
 					}
 				}
 
@@ -216,9 +231,16 @@ func PairCreatedEventListen(client *ethclient.Client, bot *telego.Bot) {
 
 }
 
-func MarketOpenEventListen(client *ethclient.Client, pool common.Address) {
+func MarketOpenEventListen(client *ethclient.Client, pool common.Address, bot *telego.Bot, token *Token) {
 	v2SwapSigHash := common.HexToHash("0xd78ad95fa46c994b6551d0da85fc275fe613ce37657fb8d5e3d130840159d822")
 	v2PairAddress := common.HexToAddress("0xC75650fe4D14017b1e12341A97721D5ec51D5340")
+	linkPreviewOptions := &telego.LinkPreviewOptions{IsDisabled: true}
+	tgGroupId := os.Getenv("TG_GROUP_ID")
+	id, err := strconv.ParseInt(tgGroupId, 10, 64)
+	if err != nil {
+		fmt.Println("转换错误:", err)
+		return
+	}
 	v2Pair, err := v2.NewV2Pair(v2PairAddress, client)
 	if err != nil {
 		log.Fatalf("Failed to create instance of factory contract: %v", err)
@@ -252,6 +274,26 @@ func MarketOpenEventListen(client *ethclient.Client, pool common.Address) {
 				fmt.Println("market open --------")
 				fmt.Println("pool:", pool.Hex())
 				fmt.Println(event)
+				inlineKeyboard := tu.InlineKeyboard(
+					tu.InlineKeyboardRow( // Row 2
+						tu.InlineKeyboardButton("Trading on UniSwap🐴").WithURL("https://app.uniswap.org/explore/tokens/ethereum/" + token.Address.Hex()), // Column 1
+					),
+				)
+				_, err2 := bot.SendMessage(
+					tu.Message(
+						tu.ID(id),
+						"<b>🚀 新币开盘 🚀\n"+"\n"+
+							"代币:"+fmt.Sprintf("<a href='https://etherscan.io/token/%s'>%s(%s)</a>", token.Address.Hex(), token.Symbol, token.Name)+"\n"+
+							"合约:<code>"+token.Address.Hex()+"</code>\n"+
+							"Lp:<code>"+pool.Hex()+"</code>\n\n"+
+							"交易对:"+token.Symbol+"/WETH\n"+
+							"DEX:"+"Uniswap-v2\n"+
+							"</b>",
+					).WithParseMode(telego.ModeHTML).WithLinkPreviewOptions(linkPreviewOptions).WithReplyMarkup(inlineKeyboard),
+				)
+				if err2 != nil {
+					log.Fatalf("send message err")
+				}
 				done <- true
 				//sub.Unsubscribe()
 			}
